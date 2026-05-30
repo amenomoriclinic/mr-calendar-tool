@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期限管理カレンダー登録ツール</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {
     --bg: #0f1117;
@@ -158,18 +159,14 @@
 </div>
 <div id="toast-container"></div>
 <script>
-let GOOGLE_CLIENT_ID = '';
+let GOOGLE_CLIENT_ID = '318848654906-s0m3dalbnfj2v8f6mlguj1mmgn6joumf.apps.googleusercontent.com';
 let authState = { connected: false, email: '', accessToken: '', clinicCalendarId: 'primary' };
 let extractedEvents = [];
+let tokenClient = null;
 
 (async () => {
   try {
     const r = await fetch('/api/analyze', { method: 'OPTIONS' });
-  } catch(e) {}
-  try {
-    const r = await fetch('/api/config');
-    const d = await r.json();
-    GOOGLE_CLIENT_ID = d.googleClientId || '';
   } catch(e) {}
 })();
 
@@ -348,21 +345,24 @@ function closeModal() { document.getElementById('oauth-modal').classList.remove(
 
 function startOAuth() {
   if (!GOOGLE_CLIENT_ID) { showToast('Google Client IDが設定されていません', 'error'); return; }
-  const scope = encodeURIComponent(['https://www.googleapis.com/auth/calendar','https://www.googleapis.com/auth/calendar.events','https://www.googleapis.com/auth/userinfo.email'].join(' '));
-  const redirect = encodeURIComponent(window.location.origin + window.location.pathname);
-  window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${GOOGLE_CLIENT_ID}&redirect_uri=${redirect}&response_type=token&scope=${scope}`;
-}
-
-function handleOAuthCallback() {
-  if (!window.location.hash.includes('access_token')) return;
-  const params = new URLSearchParams(window.location.hash.slice(1));
-  const token = params.get('access_token');
-  if (!token) return;
-  authState.accessToken = token; authState.connected = true;
-  history.replaceState(null, '', window.location.pathname);
-  fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: 'Bearer ' + token } })
-    .then(r => r.json()).then(info => { authState.email = info.email || 'Googleアカウント'; onAuthSuccess(authState.email); fetchClinicCalendars(token); })
-    .catch(() => onAuthSuccess('Googleアカウント'));
+  if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) {
+    showToast('Googleのライブラリを読み込み中です。数秒後にもう一度お試しください', 'error'); return;
+  }
+  if (!tokenClient) {
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email',
+      callback: (resp) => {
+        if (resp.error || !resp.access_token) { showToast('連携できませんでした: ' + (resp.error || 'トークンを取得できません'), 'error'); return; }
+        authState.accessToken = resp.access_token;
+        authState.connected = true;
+        fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: 'Bearer ' + resp.access_token } })
+          .then(r => r.json()).then(info => { authState.email = info.email || 'Googleアカウント'; onAuthSuccess(authState.email); fetchClinicCalendars(resp.access_token); })
+          .catch(() => onAuthSuccess('Googleアカウント'));
+      },
+    });
+  }
+  tokenClient.requestAccessToken();
 }
 
 async function fetchClinicCalendars(token) {
@@ -400,8 +400,6 @@ function showToast(msg, type='success') {
   t.className = 'toast ' + type; t.textContent = msg; c.appendChild(t);
   setTimeout(() => t.remove(), 4000);
 }
-
-handleOAuthCallback();
 </script>
 </body>
 </html>
