@@ -67,6 +67,13 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   .section-title { font-size: 13px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
   .section-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+  .state-tab { background: var(--surface); border: 1px solid var(--border); color: var(--text2); border-radius: 999px; padding: 7px 16px; font-size: 13px; font-family: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; }
+  .state-tab.on { background: var(--accent, #4a9eff); border-color: var(--accent, #4a9eff); color: #fff; font-weight: 700; }
+  .tab-count { background: rgba(255,255,255,0.25); border-radius: 999px; padding: 1px 8px; font-size: 11px; min-width: 20px; text-align: center; }
+  .state-tab:not(.on) .tab-count { background: var(--border); }
+  .badge-soon { background: var(--warning, #f5a623); color: #1a1a1a; font-size: 10px; font-weight: 700; border-radius: 5px; padding: 2px 7px; margin-left: 6px; }
+  .badge-overdue { background: var(--danger, #e25555); color: #fff; font-size: 10px; font-weight: 700; border-radius: 5px; padding: 2px 7px; margin-left: 6px; }
+  .badge-stale { background: #8b5cf6; color: #fff; font-size: 10px; font-weight: 700; border-radius: 5px; padding: 2px 7px; margin-left: 6px; }
   .event-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; margin-bottom: 12px; }
   .event-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
   .event-date-badge { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; text-align: center; min-width: 56px; }
@@ -184,6 +191,11 @@
 
   <div id="results-section" style="display:none">
     <div class="section-title">抽出された日程・期限情報</div>
+    <div id="state-tabs" style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+      <button class="state-tab on" data-state="新着" onclick="switchTab('新着')">新着 <span class="tab-count" id="count-新着">0</span></button>
+      <button class="state-tab" data-state="保留" onclick="switchTab('保留')">保留 <span class="tab-count" id="count-保留">0</span></button>
+      <button class="state-tab" data-state="処理済み" onclick="switchTab('処理済み')">処理済み <span class="tab-count" id="count-処理済み">0</span></button>
+    </div>
     <div id="event-cards"></div>
     <div class="bulk-bar" id="bulk-bar" style="display:none">
       <div class="bulk-bar-text"><strong id="bulk-count">0件</strong> 抽出済み</div>
@@ -213,6 +225,7 @@
 let GOOGLE_CLIENT_ID = '318848654906-s0m3dalbnfj2v8f6mlguj1mmgn6joumf.apps.googleusercontent.com';
 let authState = { connected: false, email: '', accessToken: '', clinicCalendarId: 'primary' };
 let extractedEvents = [];
+let currentTab = '新着';
 let tokenClient = null;
 
 (async () => {
@@ -358,7 +371,7 @@ function addDeadlineCard(ev, file, base64, mediaType) {
     div.innerHTML = `<div style="font-size:13px;color:var(--text2)">⏭️ 締切なしと判定：<strong style="color:var(--text)">${esc(ev.title||file?.name||'(無題)')}</strong><br>カレンダー登録の対象外です（受領通知・案内・広告など）。</div>`;
     cards.appendChild(div); updateBulkBar(); return;
   }
-  extractedEvents.push({ ...ev, base64, mediaType, kind: 'deadline' });
+  extractedEvents.push({ ...ev, base64, mediaType, kind: 'deadline', state: ev.state || '新着', held_date: ev.held_date || '' });
 
   // 重複候補（同じ dedup_key と締切日）を探す
   const dupe = extractedEvents.find(x => x.id !== ev.id && x.kind === 'deadline'
@@ -371,12 +384,14 @@ function addDeadlineCard(ev, file, base64, mediaType) {
   const dow = due ? ['日','月','火','水','木','金','土'][new Date(due).getDay()] : '';
   const monthNames = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const impColor = ev.importance === '高' ? 'var(--danger)' : ev.importance === '中' ? 'var(--warning)' : 'var(--text2)';
-  const periodLabel = ev.start_date ? `提出期間：${ev.start_date} 〜 ${ev.due_date}` : `締切：${ev.due_date}`;
+  const st = ev.state || '新着';
 
   const div = document.createElement('div');
   div.className = 'event-card'; div.id = 'card-' + ev.id;
+  div.dataset.state = st;
+  div.style.display = (st === currentTab) ? '' : 'none';
   div.innerHTML = `
-    ${dupe ? `<div style="background:rgba(245,166,35,0.12);border:1px solid var(--warning);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:var(--warning)">⚠ 同じ件かもしれません（「${esc(dupe.title||'')}」と締切が同じ）。メールとFAXの重複の可能性。重複なら片方を登録しないでください。</div>` : ''}
+    ${dupe ? `<div style="background:rgba(245,166,35,0.12);border:1px solid var(--warning);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:var(--warning)">⚠ 同じ件かもしれません（「${esc(dupe.title||'')}」と締切が同じ）。メールとFAXの重複の可能性。</div>` : ''}
     <div class="event-header">
       <div class="event-date-badge" style="border-color:${impColor}">
         <div class="month" style="color:${impColor}">${monthNames[parseInt(m)]||'—'}</div>
@@ -385,7 +400,7 @@ function addDeadlineCard(ev, file, base64, mediaType) {
       </div>
       <div class="event-title-area">
         <input class="event-title-input" id="title-${ev.id}" value="${esc(ev.title||'')}" placeholder="対応する内容">
-        <div class="event-subtitle"><span style="color:${impColor};font-weight:700">●${ev.importance||'—'}</span> ／ ${esc(ev.category||'')} ／ ${esc(ev.from||ev.filename||'')}</div>
+        <div class="event-subtitle"><span style="color:${impColor};font-weight:700">●${ev.importance||'—'}</span> ／ ${esc(ev.category||'')} ／ ${esc(ev.from||ev.filename||'')}<span id="badge-${ev.id}">${badgeHtml(ev)}</span></div>
       </div>
     </div>
     <div class="event-fields">
@@ -402,6 +417,8 @@ function addDeadlineCard(ev, file, base64, mediaType) {
         ${base64 ? `<a class="pdf-preview-link" href="#" onclick="togglePreview(event,'${ev.id}')">📎 原本確認</a>` : ''}
         ${ev.fromSheet ? '' : `<button class="btn btn-secondary btn-sm" id="rec-${ev.id}" onclick="recordToSheet('${ev.id}')">記録する</button>`}
         <button class="btn btn-primary btn-sm" id="reg-${ev.id}" onclick="registerDeadline('${ev.id}')">カレンダーに登録</button>
+        <button class="btn btn-secondary btn-sm" id="hold-${ev.id}" onclick="changeState('${ev.id}','保留')">保留にする</button>
+        <button class="btn btn-secondary btn-sm" id="done-${ev.id}" onclick="changeState('${ev.id}','処理済み')">処理済み</button>
       </div>
     </div>
     <div id="preview-${ev.id}" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
@@ -409,7 +426,108 @@ function addDeadlineCard(ev, file, base64, mediaType) {
     </div>`;
   cards.appendChild(div);
   updateBulkBar();
+  updateTabCounts();
 }
+
+// 締切が近い／過ぎた／3日放置 の印
+function badgeHtml(ev) {
+  let html = '';
+  const today = new Date(); today.setHours(0,0,0,0);
+  if (ev.due_date) {
+    const due = new Date(ev.due_date + 'T00:00:00');
+    const diff = Math.round((due - today) / 86400000);
+    if (diff < 0) html += `<span class="badge-overdue">期限切れ ${-diff}日</span>`;
+    else if (diff === 0) html += `<span class="badge-overdue">本日締切</span>`;
+    else if (diff <= 7) html += `<span class="badge-soon">あと${diff}日</span>`;
+  }
+  if (ev.state === '保留' && ev.held_date) {
+    const held = new Date(ev.held_date + 'T00:00:00');
+    const days = Math.round((today - held) / 86400000);
+    if (days >= 3) html += `<span class="badge-stale">${days}日 放置</span>`;
+  }
+  return html;
+}
+
+// タブ切り替え
+function switchTab(state) {
+  currentTab = state;
+  document.querySelectorAll('.state-tab').forEach(t => t.classList.toggle('on', t.dataset.state === state));
+  document.querySelectorAll('#event-cards .event-card').forEach(c => {
+    c.style.display = (c.dataset.state === state) ? '' : 'none';
+  });
+}
+
+function updateTabCounts() {
+  const counts = { '新着':0, '保留':0, '処理済み':0 };
+  document.querySelectorAll('#event-cards .event-card').forEach(c => {
+    if (counts[c.dataset.state] !== undefined) counts[c.dataset.state]++;
+  });
+  ['新着','保留','処理済み'].forEach(s => {
+    const el = document.getElementById('count-' + s);
+    if (el) el.textContent = counts[s];
+  });
+}
+
+// 状態を変更（画面＋スプレッドシート両方）
+async function changeState(evId, newState) {
+  if (!authState.connected) { openOAuthModal(); return; }
+  const ev = extractedEvents.find(x => x.id === evId);
+  if (!ev) return;
+  const card = document.getElementById('card-' + evId);
+  const holdBtn = document.getElementById('hold-' + evId);
+  const doneBtn = document.getElementById('done-' + evId);
+  if (holdBtn) holdBtn.disabled = true;
+  if (doneBtn) doneBtn.disabled = true;
+  ev.state = newState;
+  if (newState === '保留') ev.held_date = new Date().toISOString().slice(0,10);
+  try {
+    await updateSheetRow(ev);
+    // 画面に反映：カードの状態タグを変え、今のタブに合わせて表示/非表示
+    if (card) {
+      card.dataset.state = newState;
+      card.style.display = (newState === currentTab) ? '' : 'none';
+    }
+    const badgeEl = document.getElementById('badge-' + evId);
+    if (badgeEl) badgeEl.innerHTML = badgeHtml(ev);
+    updateTabCounts();
+    showToast(`「${newState}」にしました`, 'success');
+  } catch(e) {
+    showToast('状態の更新に失敗: ' + e.message, 'error');
+    if (holdBtn) holdBtn.disabled = false;
+    if (doneBtn) doneBtn.disabled = false;
+  }
+}
+
+// スプレッドシートの該当行（管理IDで照合）を書き換える
+async function updateSheetRow(ev) {
+  if (!sheetId) throw new Error('スプレッドシートIDが未設定です');
+  // まず全行を読んで、管理ID（A列）が一致する行番号を探す
+  const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/A:A`;
+  const r = await fetch(getUrl, { headers: { 'Authorization': 'Bearer ' + authState.accessToken } });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error?.message || '行の検索に失敗');
+  const col = data.values || [];
+  let rowNum = -1;
+  for (let i = 0; i < col.length; i++) { if (col[i][0] === ev.id) { rowNum = i + 1; break; } }
+  if (rowNum < 0) {
+    // シートにまだ無い場合は追記（記録ボタンを押さずに状態変更したケース）
+    return appendToSheet(ev);
+  }
+  const now = new Date().toISOString().slice(0,16).replace('T',' ');
+  // I列=状態, J列=保留にした日, L列=更新日時 を更新
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values:batchUpdate`;
+  const body = { valueInputOption: 'USER_ENTERED', data: [
+    { range: `I${rowNum}`, values: [[ev.state]] },
+    { range: `J${rowNum}`, values: [[ev.held_date || '']] },
+    { range: `L${rowNum}`, values: [[now]] }
+  ]};
+  const resp = await fetch(url, { method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + authState.accessToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body) });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || '行の更新に失敗'); }
+  return true;
+}
+
 
 async function recordToSheet(evId) {
   if (!authState.connected) { openOAuthModal(); return; }
