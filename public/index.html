@@ -141,9 +141,27 @@
   <div id="gmail-section" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;margin-bottom:20px">
     <div style="font-size:13px;font-weight:700;margin-bottom:8px">📧 Gmailから締切のある事務連絡を取り込む</div>
     <div style="font-size:12px;color:var(--text2);margin-bottom:10px">下の「読み取る差出人」に該当するメールだけを読みます。患者さんとのやり取りなど、ここに無いメールには触れません。</div>
-    <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:4px">読み取る差出人・条件（Gmail検索式）</label>
-    <textarea id="gmail-query" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text);background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;width:100%;min-height:54px;outline:none">from:(iryohokenjyoho-portalsite.jp OR pref.osaka.lg.jp OR ssk.or.jp OR doc-net.or.jp OR e-tumo.jp) newer_than:60d</textarea>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+
+    <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:6px">読み取る差出人（メールアドレス、または @より後ろのドメイン）</label>
+    <div id="sender-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <input id="sender-input" type="text" placeholder="例：pref.osaka.lg.jp または info@example.com"
+        style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text);background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;flex:1;min-width:200px;outline:none"
+        onkeydown="if(event.key==='Enter'){addSender();}">
+      <button class="btn btn-secondary btn-sm" onclick="addSender()">＋ 差出人を追加</button>
+    </div>
+
+    <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:4px">読み取る期間（過去何日ぶん）</label>
+    <select id="gmail-days" style="font-size:12px;color:var(--text);background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 10px;margin-bottom:12px" onchange="saveSenders()">
+      <option value="30">過去30日</option>
+      <option value="60" selected>過去60日</option>
+      <option value="90">過去90日</option>
+      <option value="180">過去180日</option>
+    </select>
+
+    <div style="font-size:11px;color:var(--text3);margin-bottom:8px">組み立てられる検索条件：<span id="query-preview" style="font-family:'DM Mono',monospace;color:var(--text2)"></span></div>
+
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <button class="btn btn-primary btn-sm" onclick="importFromGmail()" id="gmail-btn">この条件でGmailを読む</button>
       <span style="font-size:11px;color:var(--text3)" id="gmail-status"></span>
     </div>
@@ -187,6 +205,8 @@ let tokenClient = null;
     const r = await fetch('/api/analyze', { method: 'OPTIONS' });
   } catch(e) {}
 })();
+
+loadSenders();
 
 const uploadZone = document.getElementById('upload-zone');
 uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
@@ -541,10 +561,66 @@ function onAuthSuccess(email) {
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // ===== Gmail から指定差出人のメールだけ読み、締切を抽出 =====
+// ===== 差出人リストの管理（このパソコンに保存。後でスプレッド連携で全端末共有に拡張可） =====
+const DEFAULT_SENDERS = ['iryohokenjyoho-portalsite.jp','pref.osaka.lg.jp','ssk.or.jp','doc-net.or.jp','e-tumo.jp'];
+let senderList = [];
+
+function loadSenders() {
+  try {
+    const saved = localStorage.getItem('clinic_senders');
+    const days = localStorage.getItem('clinic_gmail_days');
+    senderList = saved ? JSON.parse(saved) : DEFAULT_SENDERS.slice();
+    if (days) document.getElementById('gmail-days').value = days;
+  } catch(e) { senderList = DEFAULT_SENDERS.slice(); }
+  renderSenders();
+}
+
+function saveSenders() {
+  try {
+    localStorage.setItem('clinic_senders', JSON.stringify(senderList));
+    localStorage.setItem('clinic_gmail_days', document.getElementById('gmail-days').value);
+  } catch(e) {}
+  renderQueryPreview();
+}
+
+function renderSenders() {
+  const wrap = document.getElementById('sender-chips');
+  if (!senderList.length) {
+    wrap.innerHTML = '<span style="font-size:11px;color:var(--text3)">差出人がありません。下の欄から追加してください。</span>';
+  } else {
+    wrap.innerHTML = senderList.map((s,i) =>
+      `<span style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:4px 6px 4px 12px;font-size:12px;font-family:'DM Mono',monospace">${esc(s)}<button onclick="removeSender(${i})" style="border:none;background:var(--border);color:var(--text);border-radius:50%;width:18px;height:18px;cursor:pointer;font-size:12px;line-height:1;padding:0">×</button></span>`
+    ).join('');
+  }
+  renderQueryPreview();
+}
+
+function addSender() {
+  const inp = document.getElementById('sender-input');
+  let v = inp.value.trim();
+  if (!v) return;
+  v = v.replace(/^from:/i,'').replace(/[(),]/g,'').trim();
+  if (v && !senderList.includes(v)) { senderList.push(v); saveSenders(); renderSenders(); }
+  inp.value = '';
+}
+
+function removeSender(i) { senderList.splice(i,1); saveSenders(); renderSenders(); }
+
+function buildQuery() {
+  const days = document.getElementById('gmail-days').value || '60';
+  if (!senderList.length) return '';
+  return `from:(${senderList.join(' OR ')}) newer_than:${days}d`;
+}
+
+function renderQueryPreview() {
+  const el = document.getElementById('query-preview');
+  if (el) el.textContent = buildQuery() || '（差出人未設定）';
+}
+
 async function importFromGmail() {
   if (!authState.connected) { openOAuthModal(); return; }
-  const q = document.getElementById('gmail-query').value.trim();
-  if (!q) { showToast('読み取る条件を入力してください', 'error'); return; }
+  const q = buildQuery();
+  if (!q) { showToast('読み取る差出人を1つ以上追加してください', 'error'); return; }
   const btn = document.getElementById('gmail-btn');
   const statusEl = document.getElementById('gmail-status');
   btn.disabled = true; btn.textContent = '読み込み中…';
