@@ -482,6 +482,11 @@ async function changeState(evId, newState) {
   if (newState === '保留') ev.held_date = new Date().toISOString().slice(0,10);
   try {
     await updateSheetRow(ev);
+    // Gmail由来のメールを「処理済み」にしたら、Gmailにも「処理済み」ラベルを付ける
+    if (newState === '処理済み' && ev.gmailId) {
+      try { await applyProcessedLabel(ev.gmailId); }
+      catch(le) { showToast('ラベル付けは失敗しましたが状態は更新済み: ' + le.message, 'error'); }
+    }
     // 画面に反映：カードの状態タグを変え、今のタブに合わせて表示/非表示
     if (card) {
       card.dataset.state = newState;
@@ -497,6 +502,44 @@ async function changeState(evId, newState) {
     if (doneBtn) doneBtn.disabled = false;
   }
 }
+
+// Gmailの「処理済み」ラベルID（無ければ作る）を覚える
+let processedLabelId = null;
+async function getProcessedLabelId() {
+  if (processedLabelId) return processedLabelId;
+  const tok = authState.accessToken;
+  // 既存ラベル一覧から「処理済み」を探す
+  const listResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels',
+    { headers: { Authorization: 'Bearer ' + tok } });
+  const listData = await listResp.json();
+  if (!listResp.ok) throw new Error(listData.error?.message || 'ラベル一覧の取得に失敗');
+  const found = (listData.labels || []).find(l => l.name === '処理済み');
+  if (found) { processedLabelId = found.id; return processedLabelId; }
+  // 無ければ作成
+  const createResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '処理済み', labelListVisibility: 'labelShow', messageListVisibility: 'show' })
+  });
+  const createData = await createResp.json();
+  if (!createResp.ok) throw new Error(createData.error?.message || 'ラベル作成に失敗');
+  processedLabelId = createData.id;
+  return processedLabelId;
+}
+
+// 指定メールに「処理済み」ラベルを付ける（既読・未読は変えない）
+async function applyProcessedLabel(messageId) {
+  const labelId = await getProcessedLabelId();
+  const tok = authState.accessToken;
+  const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/' + messageId + '/modify', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ addLabelIds: [labelId] })
+  });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'ラベル付与に失敗'); }
+  return true;
+}
+
 
 // スプレッドシートの該当行（管理IDで照合）を書き換える
 async function updateSheetRow(ev) {
@@ -675,7 +718,7 @@ function startOAuth() {
   if (!tokenClient) {
     tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
-      scope: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/spreadsheets',
+      scope: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/spreadsheets',
       callback: (resp) => {
         if (resp.error || !resp.access_token) { showToast('連携できませんでした: ' + (resp.error || 'トークンを取得できません'), 'error'); return; }
         authState.accessToken = resp.access_token;
@@ -721,7 +764,7 @@ function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 // ===== Gmail から指定差出人のメールだけ読み、締切を抽出 =====
 // ===== 保存先スプレッドシート（記録庫）=====
 let sheetId = '';
-const SHEET_RANGE = 'A:L'; // 12列：管理ID 件名 差出人 分類 重要度 締切日 開始日 要約 状態 保留にした日 原本リンク 更新日時
+const SHEET_RANGE = 'A:M'; // 13列：管理ID 件名 差出人 分類 重要度 締切日 開始日 要約 状態 保留にした日 原本リンク 更新日時 GmailID
 
 function loadSheetId() {
   try { sheetId = localStorage.getItem('clinic_sheet_id') || ''; } catch(e) { sheetId = ''; }
@@ -744,7 +787,7 @@ async function appendToSheet(ev) {
   const row = [
     ev.id || '', ev.title || '', ev.from || ev.filename || '', ev.category || '',
     ev.importance || '', ev.due_date || '', ev.start_date || '', ev.summary || '',
-    ev.state || '新着', ev.held_date || '', ev.link || '', now
+    ev.state || '新着', ev.held_date || '', ev.link || '', now, ev.gmailId || ''
   ];
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${SHEET_RANGE}:append?valueInputOption=USER_ENTERED`;
   const resp = await fetch(url, {
@@ -779,6 +822,7 @@ async function loadFromSheet() {
         id: r[0], title: r[1], from: r[2], category: r[3], importance: r[4],
         due_date: r[5], start_date: r[6], summary: r[7],
         state: r[8] || '新着', held_date: r[9] || '', link: r[10] || '',
+        gmailId: r[12] || '',
         has_deadline: true, filename: r[2], fromSheet: true
       };
       addDeadlineCard(ev, null, null, null);
@@ -883,7 +927,7 @@ async function importFromGmail() {
         const received = dateHdr ? new Date(dateHdr).toISOString().slice(0,10) : '';
         const bodyText = extractGmailBody(m.payload).slice(0, 8000);
         const event = await analyzeEmailViaBackend({ subject, from, body: bodyText, received });
-        addDeadlineCard({ ...event, from, filename: subject }, null, null, null);
+        addDeadlineCard({ ...event, from, filename: subject, gmailId: mid }, null, null, null);
       } catch(e) { /* 1通失敗しても続行 */ }
       done++;
     }
