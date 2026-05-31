@@ -206,8 +206,6 @@ let tokenClient = null;
   } catch(e) {}
 })();
 
-loadSenders();
-
 const uploadZone = document.getElementById('upload-zone');
 uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
 uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
@@ -564,6 +562,8 @@ function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 // ===== 差出人リストの管理（このパソコンに保存。後でスプレッド連携で全端末共有に拡張可） =====
 const DEFAULT_SENDERS = ['iryohokenjyoho-portalsite.jp','pref.osaka.lg.jp','ssk.or.jp','doc-net.or.jp','e-tumo.jp'];
 let senderList = [];
+
+loadSenders();
 
 function loadSenders() {
   try {
