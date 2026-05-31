@@ -123,14 +123,32 @@
     </div>
     <button class="btn btn-primary" onclick="openOAuthModal()">Google で連携</button>
   </div>
+  <div class="upload-mode" id="upload-mode" style="display:flex;gap:8px;margin-bottom:12px">
+    <label class="cal-checkbox" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 14px;cursor:pointer">
+      <input type="radio" name="mode" value="deadline" checked><span>📋 締切・提出期間（行政/補助金/加算・FAXのスキャンや書類）</span></label>
+    <label class="cal-checkbox" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 14px;cursor:pointer">
+      <input type="radio" name="mode" value="event"><span>📅 勉強会・講演会のパンフレット</span></label>
+  </div>
   <div class="upload-zone" id="upload-zone">
     <input type="file" id="file-input" accept=".pdf,image/*" multiple onchange="handleFiles(this.files)">
     <span class="upload-icon">📄</span>
     <div class="upload-title">PDFまたは写真をドロップ</div>
-    <div class="upload-sub">MRパンフレット・医師会案内・締め切り書類など<span>なんでも対応</span></div>
+    <div class="upload-sub">FAXのスキャン・医師会案内・締め切り書類・MRパンフレット<span>なんでも対応</span></div>
     <div class="upload-sub" style="margin-top:6px">PDF・写真両対応　｜　複数ファイル同時対応</div>
   </div>
   <div class="file-list" id="file-list"></div>
+
+  <div id="gmail-section" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;margin-bottom:20px">
+    <div style="font-size:13px;font-weight:700;margin-bottom:8px">📧 Gmailから締切のある事務連絡を取り込む</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px">下の「読み取る差出人」に該当するメールだけを読みます。患者さんとのやり取りなど、ここに無いメールには触れません。</div>
+    <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:4px">読み取る差出人・条件（Gmail検索式）</label>
+    <textarea id="gmail-query" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text);background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;width:100%;min-height:54px;outline:none">from:(iryohokenjyoho-portalsite.jp OR pref.osaka.lg.jp OR ssk.or.jp OR doc-net.or.jp OR e-tumo.jp) newer_than:60d</textarea>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="importFromGmail()" id="gmail-btn">この条件でGmailを読む</button>
+      <span style="font-size:11px;color:var(--text3)" id="gmail-status"></span>
+    </div>
+  </div>
+
   <div id="results-section" style="display:none">
     <div class="section-title">抽出された日程・期限情報</div>
     <div id="event-cards"></div>
@@ -183,6 +201,7 @@ function handleFiles(files) {
 
 function processFile(file) {
   const id = 'f' + Date.now() + Math.random().toString(36).slice(2);
+  const mode = (document.querySelector('input[name="mode"]:checked') || {}).value || 'deadline';
   addFileItem(file, id);
   const reader = new FileReader();
   reader.onload = async (e) => {
@@ -190,9 +209,11 @@ function processFile(file) {
     const mediaType = file.type || 'application/pdf';
     setFileStatus(id, 'analyzing');
     try {
-      const event = await analyzeViaBackend(base64, mediaType, file.name);
+      const kind = (mode === 'event') ? undefined : 'deadline';
+      const event = await analyzeViaBackend(base64, mediaType, file.name, kind);
       setFileStatus(id, 'done');
-      addEventCard(event, file, base64, mediaType);
+      if (kind === 'deadline') addDeadlineCard(event, file, base64, mediaType);
+      else addEventCard(event, file, base64, mediaType);
     } catch(err) {
       setFileStatus(id, 'error', err.message);
     }
@@ -219,11 +240,23 @@ function setFileStatus(id, status, msg='') {
   card.className = 'file-item ' + (status !== 'waiting' ? status : '');
 }
 
-async function analyzeViaBackend(base64Data, mediaType, filename) {
+async function analyzeViaBackend(base64Data, mediaType, filename, kind) {
   const resp = await fetch('/api/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ base64Data, mediaType, filename }),
+    body: JSON.stringify({ kind, base64Data, mediaType, filename }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || 'APIエラー');
+  return { ...data.event, id: 'evt' + Date.now() + Math.random().toString(36).slice(2) };
+}
+
+// Gmail本文（テキスト）を締切解析へ送る
+async function analyzeEmailViaBackend({ subject, from, body, received }) {
+  const resp = await fetch('/api/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'email', subject, from, body, received }),
   });
   const data = await resp.json();
   if (!resp.ok) throw new Error(data.error || 'APIエラー');
@@ -280,6 +313,99 @@ function updateBulkBar() {
   if (n > 0) { document.getElementById('bulk-bar').style.display = 'flex'; document.getElementById('bulk-count').textContent = n + '件'; }
 }
 
+// ===== 締切・提出期間カード（メール／FAX共通） =====
+function addDeadlineCard(ev, file, base64, mediaType) {
+  // 締切が無いと判定されたものはカレンダーに入れない
+  if (ev.has_deadline === false || (!ev.due_date && !ev.start_date)) {
+    document.getElementById('results-section').style.display = 'block';
+    const cards = document.getElementById('event-cards');
+    const div = document.createElement('div');
+    div.className = 'event-card'; div.id = 'card-' + ev.id;
+    div.style.opacity = '0.6';
+    div.innerHTML = `<div style="font-size:13px;color:var(--text2)">⏭️ 締切なしと判定：<strong style="color:var(--text)">${esc(ev.title||file?.name||'(無題)')}</strong><br>カレンダー登録の対象外です（受領通知・案内・広告など）。</div>`;
+    cards.appendChild(div); updateBulkBar(); return;
+  }
+  extractedEvents.push({ ...ev, base64, mediaType, kind: 'deadline' });
+
+  // 重複候補（同じ dedup_key と締切日）を探す
+  const dupe = extractedEvents.find(x => x.id !== ev.id && x.kind === 'deadline'
+    && x.dedup_key && ev.dedup_key && x.dedup_key === ev.dedup_key && x.due_date === ev.due_date);
+
+  document.getElementById('results-section').style.display = 'block';
+  const cards = document.getElementById('event-cards');
+  const due = ev.due_date || '';
+  const [y, m, d] = (due || '--').split('-');
+  const dow = due ? ['日','月','火','水','木','金','土'][new Date(due).getDay()] : '';
+  const monthNames = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const impColor = ev.importance === '高' ? 'var(--danger)' : ev.importance === '中' ? 'var(--warning)' : 'var(--text2)';
+  const periodLabel = ev.start_date ? `提出期間：${ev.start_date} 〜 ${ev.due_date}` : `締切：${ev.due_date}`;
+
+  const div = document.createElement('div');
+  div.className = 'event-card'; div.id = 'card-' + ev.id;
+  div.innerHTML = `
+    ${dupe ? `<div style="background:rgba(245,166,35,0.12);border:1px solid var(--warning);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:var(--warning)">⚠ 同じ件かもしれません（「${esc(dupe.title||'')}」と締切が同じ）。メールとFAXの重複の可能性。重複なら片方を登録しないでください。</div>` : ''}
+    <div class="event-header">
+      <div class="event-date-badge" style="border-color:${impColor}">
+        <div class="month" style="color:${impColor}">${monthNames[parseInt(m)]||'—'}</div>
+        <div class="day">${d||'?'}</div>
+        <div class="dow">${dow ? dow+'曜' : ''}</div>
+      </div>
+      <div class="event-title-area">
+        <input class="event-title-input" id="title-${ev.id}" value="${esc(ev.title||'')}" placeholder="対応する内容">
+        <div class="event-subtitle"><span style="color:${impColor};font-weight:700">●${ev.importance||'—'}</span> ／ ${esc(ev.category||'')} ／ ${esc(ev.from||ev.filename||'')}</div>
+      </div>
+    </div>
+    <div class="event-fields">
+      <div class="field"><label>提出開始日（任意・期間のとき）</label><input type="date" id="sdate-${ev.id}" value="${ev.start_date||''}"></div>
+      <div class="field"><label>締切日</label><input type="date" id="date-${ev.id}" value="${ev.due_date||''}"></div>
+      <div class="field full"><label>やること</label><textarea id="notes-${ev.id}">${esc(ev.summary||'')}</textarea></div>
+    </div>
+    <div class="event-footer">
+      <div class="cal-targets">
+        <label class="cal-checkbox"><input type="checkbox" id="cal-p-${ev.id}" checked><span>👤 個人</span></label>
+        <label class="cal-checkbox"><input type="checkbox" id="cal-c-${ev.id}" checked><span>🏥 クリニック</span></label>
+      </div>
+      <div class="event-actions">
+        ${base64 ? `<a class="pdf-preview-link" href="#" onclick="togglePreview(event,'${ev.id}')">📎 原本確認</a>` : ''}
+        <button class="btn btn-primary btn-sm" id="reg-${ev.id}" onclick="registerDeadline('${ev.id}')">カレンダーに登録</button>
+      </div>
+    </div>
+    <div id="preview-${ev.id}" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
+      <p style="font-size:11px;color:var(--text2);margin-bottom:8px">原本</p>
+    </div>`;
+  cards.appendChild(div);
+  updateBulkBar();
+}
+
+async function registerDeadline(evId) {
+  if (!authState.connected) { openOAuthModal(); return; }
+  const btn = document.getElementById('reg-' + evId);
+  btn.disabled = true; btn.textContent = '登録中…';
+  const title = document.getElementById('title-' + evId).value;
+  const due = document.getElementById('date-' + evId).value;
+  const sdate = document.getElementById('sdate-' + evId).value;
+  const notes = document.getElementById('notes-' + evId).value;
+  const useP = document.getElementById('cal-p-' + evId).checked;
+  const useC = document.getElementById('cal-c-' + evId).checked;
+  const evObj = extractedEvents.find(x => x.id === evId);
+  if (!due) { showToast('締切日を入力してください', 'error'); btn.disabled = false; btn.textContent = 'カレンダーに登録'; return; }
+  const targets = [];
+  if (useP) targets.push('primary');
+  if (useC && authState.clinicCalendarId) targets.push(authState.clinicCalendarId);
+  let ok = true;
+  for (const calId of targets) {
+    try {
+      // 期間があれば開始日〜締切日の終日予定。なければ締切日のみの終日予定。
+      const startDate = sdate || due;
+      const endDate = addDays(due, 1); // 終了日は排他的なので締切日の翌日
+      await postCalendarEvent({ calId, title: '【締切】' + title, date: startDate, endDate,
+        loc: '', notes, filename: evObj?.filename || evObj?.from || '', allDay: true });
+    } catch(e) { showToast('登録失敗: ' + e.message, 'error'); ok = false; }
+  }
+  if (ok) { showToast('✓ カレンダーに登録しました', 'success'); btn.textContent = '✓ 登録済み'; btn.style.background = 'var(--success)'; btn.style.color = '#0f1117'; }
+  else { btn.disabled = false; btn.textContent = 'カレンダーに登録'; }
+}
+
 function togglePreview(e, evId) {
   e.preventDefault();
   const area = document.getElementById('preview-' + evId);
@@ -323,12 +449,27 @@ async function registerSingle(evId) {
   else { btn.disabled = false; btn.textContent = 'カレンダーに登録'; }
 }
 
-async function postCalendarEvent({ calId, title, date, start, end, loc, notes, filename }) {
-  const startDt = `${date}T${start}:00+09:00`;
-  const endDt = end ? `${date}T${end}:00+09:00` : `${date}T${start}:00+09:00`;
-  const body = { summary: title, location: loc, description: notes + (filename ? `\n\n[原本: ${filename}]` : ''), start: { dateTime: startDt, timeZone: 'Asia/Tokyo' }, end: { dateTime: endDt, timeZone: 'Asia/Tokyo' } };
+async function postCalendarEvent({ calId, title, date, start, end, loc, notes, filename, allDay, endDate }) {
+  let body;
+  if (allDay) {
+    // 終日予定（締切・提出期間用）。endDate は「期間の翌日」を渡す（Google仕様で終了日は排他的）
+    const startD = date;
+    const endD = endDate || addDays(date, 1);
+    body = { summary: title, location: loc || '', description: (notes || '') + (filename ? `\n\n[原本: ${filename}]` : ''),
+      start: { date: startD }, end: { date: endD } };
+  } else {
+    const startDt = `${date}T${start}:00+09:00`;
+    const endDt = end ? `${date}T${end}:00+09:00` : `${date}T${start}:00+09:00`;
+    body = { summary: title, location: loc, description: notes + (filename ? `\n\n[原本: ${filename}]` : ''),
+      start: { dateTime: startDt, timeZone: 'Asia/Tokyo' }, end: { dateTime: endDt, timeZone: 'Asia/Tokyo' } };
+  }
   const resp = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events`, { method: 'POST', headers: { 'Authorization': 'Bearer ' + authState.accessToken, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (!resp.ok) { const err = await resp.json().catch(()=>({})); throw new Error(err.error?.message || 'Calendar APIエラー'); }
+}
+
+function addDays(ymd, n) {
+  const d = new Date(ymd + 'T00:00:00'); d.setDate(d.getDate() + n);
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
 
 async function registerAll() {
@@ -336,7 +477,12 @@ async function registerAll() {
   for (const card of cards) {
     const evId = card.id.replace('card-', '');
     const btn = document.getElementById('reg-' + evId);
-    if (btn && !btn.disabled) { await registerSingle(evId); await new Promise(r => setTimeout(r, 500)); }
+    if (btn && !btn.disabled) {
+      const evObj = extractedEvents.find(x => x.id === evId);
+      if (evObj && evObj.kind === 'deadline') await registerDeadline(evId);
+      else await registerSingle(evId);
+      await new Promise(r => setTimeout(r, 500));
+    }
   }
 }
 
@@ -351,7 +497,7 @@ function startOAuth() {
   if (!tokenClient) {
     tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
-      scope: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email',
+      scope: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.readonly',
       callback: (resp) => {
         if (resp.error || !resp.access_token) { showToast('連携できませんでした: ' + (resp.error || 'トークンを取得できません'), 'error'); return; }
         authState.accessToken = resp.access_token;
@@ -393,6 +539,74 @@ function onAuthSuccess(email) {
 }
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ===== Gmail から指定差出人のメールだけ読み、締切を抽出 =====
+async function importFromGmail() {
+  if (!authState.connected) { openOAuthModal(); return; }
+  const q = document.getElementById('gmail-query').value.trim();
+  if (!q) { showToast('読み取る条件を入力してください', 'error'); return; }
+  const btn = document.getElementById('gmail-btn');
+  const statusEl = document.getElementById('gmail-status');
+  btn.disabled = true; btn.textContent = '読み込み中…';
+  document.getElementById('empty-hint').style.display = 'none';
+  try {
+    const tok = authState.accessToken;
+    statusEl.textContent = 'メール一覧を取得中…';
+    const listResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=' + encodeURIComponent(q),
+      { headers: { Authorization: 'Bearer ' + tok } });
+    const listData = await listResp.json();
+    if (!listResp.ok) throw new Error(listData.error?.message || 'Gmail一覧の取得に失敗');
+    const ids = (listData.messages || []).map(m => m.id);
+    if (!ids.length) { statusEl.textContent = '該当するメールはありませんでした。'; btn.disabled = false; btn.textContent = 'この条件でGmailを読む'; return; }
+
+    let done = 0;
+    for (const mid of ids) {
+      statusEl.textContent = `解析中… (${done+1}/${ids.length})`;
+      try {
+        const mResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/' + mid + '?format=full',
+          { headers: { Authorization: 'Bearer ' + tok } });
+        const m = await mResp.json();
+        const headers = (m.payload?.headers) || [];
+        const subject = (headers.find(h => h.name === 'Subject') || {}).value || '';
+        const from = (headers.find(h => h.name === 'From') || {}).value || '';
+        const dateHdr = (headers.find(h => h.name === 'Date') || {}).value || '';
+        const received = dateHdr ? new Date(dateHdr).toISOString().slice(0,10) : '';
+        const bodyText = extractGmailBody(m.payload).slice(0, 8000);
+        const event = await analyzeEmailViaBackend({ subject, from, body: bodyText, received });
+        addDeadlineCard({ ...event, from, filename: subject }, null, null, null);
+      } catch(e) { /* 1通失敗しても続行 */ }
+      done++;
+    }
+    statusEl.textContent = `完了：${done}件を解析しました。`;
+  } catch(err) {
+    showToast('Gmail取り込み失敗: ' + err.message, 'error');
+    statusEl.textContent = '';
+  }
+  btn.disabled = false; btn.textContent = 'この条件でGmailを読む';
+}
+
+// Gmail本文（base64url, multipart対応）をテキストに復元
+function extractGmailBody(payload) {
+  if (!payload) return '';
+  const decode = (data) => {
+    try { return decodeURIComponent(escape(atob(data.replace(/-/g,'+').replace(/_/g,'/')))); }
+    catch { try { return atob(data.replace(/-/g,'+').replace(/_/g,'/')); } catch { return ''; } }
+  };
+  if (payload.mimeType === 'text/plain' && payload.body?.data) return decode(payload.body.data);
+  if (payload.parts) {
+    // text/plain を優先、なければ text/html を素朴にタグ除去
+    const plain = payload.parts.find(p => p.mimeType === 'text/plain');
+    if (plain?.body?.data) return decode(plain.body.data);
+    for (const p of payload.parts) {
+      const inner = extractGmailBody(p);
+      if (inner) return inner;
+    }
+    const html = payload.parts.find(p => p.mimeType === 'text/html');
+    if (html?.body?.data) return decode(html.body.data).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  }
+  if (payload.body?.data) return decode(payload.body.data).replace(/<[^>]+>/g, ' ');
+  return '';
+}
 
 function showToast(msg, type='success') {
   const c = document.getElementById('toast-container');
