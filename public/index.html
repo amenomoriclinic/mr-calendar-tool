@@ -167,6 +167,21 @@
     </div>
   </div>
 
+  <div id="sheet-section" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;margin-bottom:20px">
+    <div style="font-size:13px;font-weight:700;margin-bottom:8px">🗂️ 保存先スプレッドシート（全パソコンで共有する記録庫）</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:10px">締切の状態をここに記録します。どのパソコンから開いても同じ記録を読み書きします。一度設定すれば次回も保存されます。</div>
+    <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:4px">スプレッドシートID（URLの /d/ と /edit の間の長い文字列）</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <input id="sheet-id" type="text" placeholder="例：1JbNJ7ioK4Tbg...NoeCuk"
+        style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text);background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;flex:1;min-width:220px;outline:none">
+      <button class="btn btn-secondary btn-sm" onclick="saveSheetId()">IDを保存</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="loadFromSheet()" id="sheet-load-btn">保存済みの記録を読み込む</button>
+      <span style="font-size:11px;color:var(--text3)" id="sheet-status"></span>
+    </div>
+  </div>
+
   <div id="results-section" style="display:none">
     <div class="section-title">抽出された日程・期限情報</div>
     <div id="event-cards"></div>
@@ -385,6 +400,7 @@ function addDeadlineCard(ev, file, base64, mediaType) {
       </div>
       <div class="event-actions">
         ${base64 ? `<a class="pdf-preview-link" href="#" onclick="togglePreview(event,'${ev.id}')">📎 原本確認</a>` : ''}
+        ${ev.fromSheet ? '' : `<button class="btn btn-secondary btn-sm" id="rec-${ev.id}" onclick="recordToSheet('${ev.id}')">記録する</button>`}
         <button class="btn btn-primary btn-sm" id="reg-${ev.id}" onclick="registerDeadline('${ev.id}')">カレンダーに登録</button>
       </div>
     </div>
@@ -393,6 +409,32 @@ function addDeadlineCard(ev, file, base64, mediaType) {
     </div>`;
   cards.appendChild(div);
   updateBulkBar();
+}
+
+async function recordToSheet(evId) {
+  if (!authState.connected) { openOAuthModal(); return; }
+  const ev = extractedEvents.find(x => x.id === evId);
+  if (!ev) return;
+  const btn = document.getElementById('rec-' + evId);
+  if (btn) { btn.disabled = true; btn.textContent = '記録中…'; }
+  // 画面で編集された値を反映
+  const t = document.getElementById('title-' + evId);
+  const dd = document.getElementById('date-' + evId);
+  const sd = document.getElementById('sdate-' + evId);
+  const nt = document.getElementById('notes-' + evId);
+  if (t) ev.title = t.value;
+  if (dd) ev.due_date = dd.value;
+  if (sd) ev.start_date = sd.value;
+  if (nt) ev.summary = nt.value;
+  ev.state = ev.state || '新着';
+  try {
+    await appendToSheet(ev);
+    if (btn) { btn.textContent = '✓ 記録済み'; btn.style.background = 'var(--success)'; btn.style.color = '#0f1117'; }
+    showToast('✓ スプレッドシートに記録しました', 'success');
+  } catch(e) {
+    showToast('記録失敗: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '記録する'; }
+  }
 }
 
 async function registerDeadline(evId) {
@@ -515,7 +557,7 @@ function startOAuth() {
   if (!tokenClient) {
     tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
-      scope: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.readonly',
+      scope: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/spreadsheets',
       callback: (resp) => {
         if (resp.error || !resp.access_token) { showToast('連携できませんでした: ' + (resp.error || 'トークンを取得できません'), 'error'); return; }
         authState.accessToken = resp.access_token;
@@ -559,11 +601,85 @@ function onAuthSuccess(email) {
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // ===== Gmail から指定差出人のメールだけ読み、締切を抽出 =====
+// ===== 保存先スプレッドシート（記録庫）=====
+let sheetId = '';
+const SHEET_RANGE = 'A:L'; // 12列：管理ID 件名 差出人 分類 重要度 締切日 開始日 要約 状態 保留にした日 原本リンク 更新日時
+
+function loadSheetId() {
+  try { sheetId = localStorage.getItem('clinic_sheet_id') || ''; } catch(e) { sheetId = ''; }
+  const inp = document.getElementById('sheet-id');
+  if (inp) inp.value = sheetId;
+}
+function saveSheetId() {
+  const v = document.getElementById('sheet-id').value.trim()
+    .replace(/^https?:\/\/.*\/d\//,'').replace(/\/.*$/,''); // URLを貼られてもIDだけ取り出す
+  sheetId = v;
+  try { localStorage.setItem('clinic_sheet_id', v); } catch(e) {}
+  document.getElementById('sheet-id').value = v;
+  showToast(v ? 'スプレッドシートIDを保存しました' : 'IDを空にしました', v ? 'success' : 'error');
+}
+
+// 1案件をスプレッドシートに1行追記
+async function appendToSheet(ev) {
+  if (!sheetId) { showToast('先にスプレッドシートIDを設定してください', 'error'); return false; }
+  const now = new Date().toISOString().slice(0,16).replace('T',' ');
+  const row = [
+    ev.id || '', ev.title || '', ev.from || ev.filename || '', ev.category || '',
+    ev.importance || '', ev.due_date || '', ev.start_date || '', ev.summary || '',
+    ev.state || '新着', ev.held_date || '', ev.link || '', now
+  ];
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${SHEET_RANGE}:append?valueInputOption=USER_ENTERED`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + authState.accessToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values: [row] })
+  });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'スプレッドシート書き込みエラー'); }
+  return true;
+}
+
+// スプレッドシートから記録を読み出して画面に並べる
+async function loadFromSheet() {
+  if (!authState.connected) { openOAuthModal(); return; }
+  if (!sheetId) { showToast('先にスプレッドシートIDを設定してください', 'error'); return; }
+  const btn = document.getElementById('sheet-load-btn');
+  const statusEl = document.getElementById('sheet-status');
+  btn.disabled = true; btn.textContent = '読み込み中…';
+  try {
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${SHEET_RANGE}`;
+    const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + authState.accessToken } });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error?.message || '読み込みエラー');
+    const rows = data.values || [];
+    document.getElementById('empty-hint').style.display = 'none';
+    let count = 0;
+    // 1行目は見出しなので飛ばす
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r || !r[0]) continue;
+      const ev = {
+        id: r[0], title: r[1], from: r[2], category: r[3], importance: r[4],
+        due_date: r[5], start_date: r[6], summary: r[7],
+        state: r[8] || '新着', held_date: r[9] || '', link: r[10] || '',
+        has_deadline: true, filename: r[2], fromSheet: true
+      };
+      addDeadlineCard(ev, null, null, null);
+      count++;
+    }
+    statusEl.textContent = `保存済み ${count}件を読み込みました。`;
+  } catch(err) {
+    showToast('読み込み失敗: ' + err.message, 'error');
+    statusEl.textContent = '';
+  }
+  btn.disabled = false; btn.textContent = '保存済みの記録を読み込む';
+}
+
 // ===== 差出人リストの管理（このパソコンに保存。後でスプレッド連携で全端末共有に拡張可） =====
 const DEFAULT_SENDERS = ['iryohokenjyoho-portalsite.jp','pref.osaka.lg.jp','ssk.or.jp','doc-net.or.jp','e-tumo.jp'];
 let senderList = [];
 
 loadSenders();
+loadSheetId();
 
 function loadSenders() {
   try {
