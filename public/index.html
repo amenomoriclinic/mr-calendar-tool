@@ -415,10 +415,16 @@ function addDeadlineCard(ev, file, base64, mediaType) {
       </div>
       <div class="event-actions">
         ${base64 ? `<a class="pdf-preview-link" href="#" onclick="togglePreview(event,'${ev.id}')">📎 原本確認</a>` : ''}
+        ${ev.mailBody ? `<button class="btn btn-secondary btn-sm" onclick="toggleMailBody('${ev.id}')">📧 本文を読む</button>` : ''}
         ${ev.fromSheet ? '' : `<button class="btn btn-secondary btn-sm" id="rec-${ev.id}" onclick="recordToSheet('${ev.id}')">記録する</button>`}
         <button class="btn btn-primary btn-sm" id="reg-${ev.id}" onclick="registerDeadline('${ev.id}')">カレンダーに登録</button>
         <button class="btn btn-secondary btn-sm" id="hold-${ev.id}" onclick="changeState('${ev.id}','保留')">保留にする</button>
         <button class="btn btn-secondary btn-sm" id="done-${ev.id}" onclick="changeState('${ev.id}','処理済み')">処理済み</button>
+        ${ev.gmailId ? `<button class="btn btn-secondary btn-sm" id="arch-${ev.id}" onclick="archiveMail('${ev.id}')">📥 受信トレイから片付ける</button>` : ''}
+      </div>
+      <div id="mailbody-${ev.id}" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:6px">メール本文</div>
+        <div style="font-size:13px;color:var(--text);white-space:pre-wrap;line-height:1.7;max-height:320px;overflow:auto;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px">${esc(ev.mailBody || '本文がありません')}</div>
       </div>
     </div>
     <div id="preview-${ev.id}" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
@@ -469,6 +475,35 @@ function updateTabCounts() {
 }
 
 // 状態を変更（画面＋スプレッドシート両方）
+// メール本文の開閉
+function toggleMailBody(evId) {
+  const el = document.getElementById('mailbody-' + evId);
+  if (el) el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+}
+
+// メールをアーカイブ（受信トレイから外す。削除はしない＝検索で残る）
+async function archiveMail(evId) {
+  if (!authState.connected) { openOAuthModal(); return; }
+  const ev = extractedEvents.find(x => x.id === evId);
+  if (!ev || !ev.gmailId) { showToast('このカードはGmail由来ではないため片付けできません', 'error'); return; }
+  if (!confirm('このメールを受信トレイから片付けます（削除はしません。検索すれば残ります）。よろしいですか？')) return;
+  const btn = document.getElementById('arch-' + evId);
+  if (btn) { btn.disabled = true; btn.textContent = '片付け中…'; }
+  try {
+    const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/' + ev.gmailId + '/modify', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + authState.accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ removeLabelIds: ['INBOX'] })  // 受信トレイから外すだけ（完全削除ではない）
+    });
+    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'アーカイブに失敗'); }
+    if (btn) { btn.textContent = '✓ 片付け済み'; btn.style.background = 'var(--success)'; btn.style.color = '#0f1117'; }
+    showToast('✓ 受信トレイから片付けました（メールは削除されていません）', 'success');
+  } catch(e) {
+    showToast('片付けに失敗: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '📥 受信トレイから片付ける'; }
+  }
+}
+
 async function changeState(evId, newState) {
   if (!authState.connected) { openOAuthModal(); return; }
   const ev = extractedEvents.find(x => x.id === evId);
@@ -927,7 +962,7 @@ async function importFromGmail() {
         const received = dateHdr ? new Date(dateHdr).toISOString().slice(0,10) : '';
         const bodyText = extractGmailBody(m.payload).slice(0, 8000);
         const event = await analyzeEmailViaBackend({ subject, from, body: bodyText, received });
-        addDeadlineCard({ ...event, from, filename: subject, gmailId: mid }, null, null, null);
+        addDeadlineCard({ ...event, from, filename: subject, gmailId: mid, mailBody: bodyText }, null, null, null);
       } catch(e) { /* 1通失敗しても続行 */ }
       done++;
     }
