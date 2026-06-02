@@ -660,16 +660,22 @@ async function registerDeadline(evId) {
   if (useP) targets.push('primary');
   if (useC && authState.clinicCalendarId) targets.push(authState.clinicCalendarId);
   let ok = true;
+  let skipped = 0;
   for (const calId of targets) {
     try {
       // 期間があれば開始日〜締切日の終日予定。なければ締切日のみの終日予定。
       const startDate = sdate || due;
       const endDate = addDays(due, 1); // 終了日は排他的なので締切日の翌日
-      await postCalendarEvent({ calId, title: '【締切】' + title, date: startDate, endDate,
+      const r = await postCalendarEvent({ calId, title: '【締切】' + title, date: startDate, endDate,
         loc: '', notes, filename: evObj?.filename || evObj?.from || '', allDay: true });
+      if (r && r.skipped) skipped++;
     } catch(e) { showToast('登録失敗: ' + e.message, 'error'); ok = false; }
   }
-  if (ok) { showToast('✓ カレンダーに登録しました', 'success'); btn.textContent = '✓ 登録済み'; btn.style.background = 'var(--success)'; btn.style.color = '#0f1117'; }
+  if (ok) {
+    if (skipped > 0 && skipped === targets.length) { showToast('すでに登録済みでした（重複は追加しません）', 'success'); btn.textContent = '✓ 登録済み'; }
+    else { showToast('✓ カレンダーに登録しました', 'success'); btn.textContent = '✓ 登録済み'; }
+    btn.style.background = 'var(--success)'; btn.style.color = '#0f1117';
+  }
   else { btn.disabled = false; btn.textContent = 'カレンダーに登録'; }
 }
 
@@ -708,15 +714,25 @@ async function registerSingle(evId) {
   if (useP) targets.push('primary');
   if (useC && authState.clinicCalendarId) targets.push(authState.clinicCalendarId);
   let ok = true;
+  let skipped = 0;
   for (const calId of targets) {
-    try { await postCalendarEvent({ calId, title, date, start, end, loc, notes, filename: evObj?.filename || '' }); }
+    try { const r = await postCalendarEvent({ calId, title, date, start, end, loc, notes, filename: evObj?.filename || '' }); if (r && r.skipped) skipped++; }
     catch(e) { showToast('登録失敗: ' + e.message, 'error'); ok = false; }
   }
-  if (ok) { showToast('✓ カレンダーに登録しました', 'success'); btn.textContent = '✓ 登録済み'; btn.style.background = 'var(--success)'; btn.style.color = '#0f1117'; }
+  if (ok) {
+    if (skipped > 0 && skipped === targets.length) { showToast('すでに登録済みでした（重複は追加しません）', 'success'); btn.textContent = '✓ 登録済み'; }
+    else { showToast('✓ カレンダーに登録しました', 'success'); btn.textContent = '✓ 登録済み'; }
+    btn.style.background = 'var(--success)'; btn.style.color = '#0f1117';
+  }
   else { btn.disabled = false; btn.textContent = 'カレンダーに登録'; }
 }
 
 async function postCalendarEvent({ calId, title, date, start, end, loc, notes, filename, allDay, endDate }) {
+  // 重複チェック：同じカレンダーの同じ日に、同じタイトルの予定が既にあれば登録しない
+  const already = await calendarHasEvent(calId, title, date);
+  if (already) {
+    return { skipped: true };
+  }
   let body;
   if (allDay) {
     // 終日予定（締切・提出期間用）。endDate は「期間の翌日」を渡す（Google仕様で終了日は排他的）
@@ -732,7 +748,27 @@ async function postCalendarEvent({ calId, title, date, start, end, loc, notes, f
   }
   const resp = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events`, { method: 'POST', headers: { 'Authorization': 'Bearer ' + authState.accessToken, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (!resp.ok) { const err = await resp.json().catch(()=>({})); throw new Error(err.error?.message || 'Calendar APIエラー'); }
+  return { skipped: false };
 }
+
+// 指定カレンダーの指定日に、同じタイトルの予定が既にあるか調べる
+async function calendarHasEvent(calId, title, date) {
+  try {
+    const timeMin = new Date(date + 'T00:00:00+09:00').toISOString();
+    const timeMax = new Date(date + 'T23:59:59+09:00').toISOString();
+    const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events`
+      + `?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&maxResults=50`;
+    const resp = await fetch(url, { headers: { Authorization: 'Bearer ' + authState.accessToken } });
+    if (!resp.ok) return false; // 調べられなければ、登録は止めない（安全側）
+    const data = await resp.json();
+    const norm = s => String(s || '').replace(/\s+/g, '').trim();
+    const want = norm(title);
+    return (data.items || []).some(ev => norm(ev.summary) === want);
+  } catch(e) {
+    return false; // エラー時は重複チェックをあきらめ、登録は通す
+  }
+}
+
 
 function addDays(ymd, n) {
   const d = new Date(ymd + 'T00:00:00'); d.setDate(d.getDate() + n);
