@@ -969,7 +969,8 @@ function removeSender(i) { senderList.splice(i,1); saveSenders(); renderSenders(
 function buildQuery() {
   const days = document.getElementById('gmail-days').value || '60';
   if (!senderList.length) return '';
-  return `from:(${senderList.join(' OR ')}) newer_than:${days}d`;
+  // in:inbox を付けて、受信トレイにあるものだけ読む（アーカイブ済みは出てこない）
+  return `in:inbox from:(${senderList.join(' OR ')}) newer_than:${days}d`;
 }
 
 function renderQueryPreview() {
